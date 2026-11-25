@@ -1,129 +1,86 @@
-# Sports Analytics MVP 🎯
+# LeviBet – Sports Analytics & Signal Engine
 
-This repository contains the foundational MVP for a **Sports Analytics and Signal Dispatching Product**. The system uses a **Bayesian model** to evaluate team strengths, generates **feature snapshots**, runs prediction models, and dispatches high-confidence signals via **Telegram**.
+A football analytics pipeline: Bayesian team-strength model → match probabilities → comparison with
+de-margined bookmaker odds → **informational value signals** → (optional) Telegram channel, with
+settlement and a transparent track record (ROI ± standard error, closing line value, Brier, log loss).
 
-## 🧠 Architecture Overview
+> **LeviBet does not place bets, does not take stakes, has no affiliate links and gives no stake sizing.**
+> Signals are statistical model output, not betting advice, and promise no profit.
 
-The system is built with a resilient and scalable modular architecture:
+## Pipeline
 
-1. **PostgreSQL Database**: Acts as the single source of truth. Stores raw event data, `odds_snapshots`, `feature_snapshots` (JSONB) as our lightweight Feature Store, and Bayesian `team_strengths`.
-2. **Bayesian Core (PyMC)**: Processes historical data to infer latent relative strengths (attack vs. defense) of teams using Markov Chain Monte Carlo (MCMC).
-3. **Prediction Engine**: Consumes snapshot features from the database to generate 1X2 market probabilities.
-4. **Signal Dispatcher**: Continuously evaluates current predictions and drops insights (Telegram signals) for identified 'edges'.
-5. **FastAPI Serving Layer**: Serves predictions and match data to front-end consumers or dashboard interfaces.
-
-## 🛠️ Technology Stack
-
-- **API:** FastAPI, Pydantic, Uvicorn
-- **Database:** PostgreSQL, SQLAlchemy (ORM), Alembic
-- **Machine Learning:** PyMC (Bayesian Inference), Pandas, Numpy
-- **CLI/Task Execution:** Typer
-- **Containerization:** Docker & Docker Compose
-
-## 🚀 Getting Started
-
-To spin up the entire application (API, Background Worker, and Database) out of the box:
-
-```bash
-# Start all services
-docker-compose up --build
+```
+football-data CSV / The Odds API ─► matches, results, odds_snapshots
+        └─► train-bayes   (PyMC Poisson attack/defence, zero-sum + hierarchical sd, per league)
+        └─► predict       (posterior draws → 1X2, over 2.5, BTTS, probability std, confidence)
+        └─► signals       (devig power method, consensus market prob, edge vs conservative edge)
+        └─► dispatch      (dry-run by default; Telegram plain text with disclaimer)
+        └─► settle        (win/loss/void, flat 1-unit P&L, closing odds, CLV)
+        └─► performance   (hit rate, ROI ± SE, avg CLV, Brier, log loss, calibration)
 ```
 
-- **FastAPI Server** will map to `localhost:8000` (Visit `http://localhost:8000/docs` for the Swagger UI).
-- **PostgreSQL Database** will map to `localhost:5432`.
-- **Worker Process** will start executing continuous prediction & signal delivery loops.
+Signal rules: `edge = p·odds − 1`, `conservative edge = (p − k·σ)·odds − 1`. A signal needs
+conservative edge ≥ `MIN_EDGE`; edges above `MAX_EDGE` are discarded as probable errors; odds must be
+within `MIN_ODDS..MAX_ODDS`, fresh (`MAX_ODDS_AGE_MINUTES`) and the match at least
+`MIN_MINUTES_TO_KICKOFF` away. One signal per match, at most `MAX_SIGNALS_PER_RUN` per run.
 
----
-
-## 💻 Working with the CLI (`cli.py`)
-
-A Typer-based CLI is included to allow you to interactively test, manage, and debug the system without entering the Docker containers or wrestling with scripts.
-
-Make sure you have your dependencies installed (or you are inside the Docker container) when running these:
-
-### 1. Initialize the Database
-
-Creates all required tables in the PostgreSQL database.
+## Quick start (no data, no keys)
 
 ```bash
-python cli.py init-db
-```
-
-### 2. Train the Bayesian Model
-
-Loads historical data, compiles the PyMC Poisson model, runs the MCMC sampling, and writes the resulting posterior mean/std statistics into the `bayesian_team_strength` table.
-
-```bash
+pip install -r requirements.txt -r requirements-dev.txt
+export DATABASE_URL=sqlite:///./levibet.db
+python cli.py seed-demo       # synthetic "Demo League" (never sent to Telegram)
 python cli.py train-bayes
-```
-
-### 3. Generate Predictions manually
-
-Fetches the latest `feature_snapshots` from the database, applies the meta-model, and writes new probable outcomes into the `predictions` table.
-
-```bash
 python cli.py predict
+python cli.py signals         # dry-run: prints the message instead of sending
+python cli.py performance
+python cli.py run-api         # http://localhost:8000/docs
+pytest
 ```
 
-### 4. Run the API Server manually
-
-Starts the FastAPI uvicorn daemon. Very useful for local development outside of docker-compose.
+## Real data
 
 ```bash
-python cli.py run-api
+python cli.py import-csv E0.csv "Premier League" --season 2024/25   # football-data.co.uk format
+python cli.py train-bayes
+# live odds: set ODDS_API_KEY (and ODDS_API_SPORTS="soccer_epl=Premier League")
+python cli.py ingest-odds && python cli.py predict && python cli.py signals
 ```
 
-### 5. Run the Background Worker manually
+Team names differ between providers; extend `TEAM_ALIASES` in `app/services/odds/ingest.py` for your leagues.
 
-Starts the prediction daemon loop (the engine that continuously triggers predictions and evaluates signals for Telegram dispatch).
+## Docker
 
 ```bash
-python cli.py run-worker
+cp .env.example .env
+docker compose up --build        # api on :8000, worker loop, postgres
+docker compose run --rm api python cli.py seed-demo
 ```
 
----
+## API
 
-## 🗄️ Project Structure
+`GET /health`, `/matches/upcoming`, `/predictions/latest`, `/signals/latest`, `/performance`;
+`POST /admin/train-bayes/run` (header `X-Admin-Token`; disabled while `ADMIN_TOKEN` is empty).
 
-```text
-.
-├── docker-compose.yml              # Architecture Services
-├── Dockerfile                      # App Container definition
-├── requirements.txt                # Python Dependencies
-├── cli.py                          # 🛠️ Command Line Interface Controller
-├── .env                            # Environment variables (DB URL, API Tokens)
-└── app/
-    ├── api/
-    │   └── main.py                 # FastAPI endpoints
-    ├── core/
-    │   └── config.py               # pydantic_settings configuration
-    ├── db/
-    │   ├── models.py               # SQLAlchemy schema definitions
-    │   └── session.py              # DB Engine & Session Makers
-    ├── services/
-    │   ├── bayesian/
-    │   │   └── train_team_strength.py  # PyMC model compilation & training
-    │   ├── predictions/
-    │   │   └── generate_predictions.py # Generating inferences from features
-    │   └── telegram/
-    │       └── sender.py           # Signal text formatting & API client
-    └── workers/
-        └── predict_worker.py       # Infinite loop worker for continuous pipeline
-```
+## Going live with Telegram
 
-## 🔒 Environment Variables
+Signals stay in **dry-run** until `SIGNALS_DRY_RUN=false` *and* `TELEGRAM_BOT_TOKEN` /
+`TELEGRAM_CHANNEL_ID` are set. Demo-league signals are never sent.
 
-Copy the `.env` file configuration and update credentials appropriately:
+## Limits you should know
 
-```dotenv
-DATABASE_URL=postgresql://sports:sports@localhost:5432/sports
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-TELEGRAM_CHANNEL_ID=your_channel_id_here
-```
+- Independent-Poisson goals ignore correlation and low-score inflation; the model is a baseline, not an oracle.
+- Beating closing odds consistently is hard. Judge the system by CLV and calibration over hundreds of
+  signals, not by a handful of results. Backtest on historical data before trusting any signal.
+- Posterior parameters are treated as independent when drawing predictions (approximation).
+- Alembic migrations are not set up; `create_all` is MVP-only.
 
-_(Note: Use `@db` as the hostname instead of `localhost` if running commands from inside the api/worker docker containers)._
+## Compliance (not legal advice)
 
-## 🛑 Important Notes
-
-- **Signals vs Bets:** This architecture generates and alerts about statistical _"edges"_ (Signals). It **does not inherently place automated bets**.
-- **Feature Completeness:** To feed the MCMC pipeline, an Ingestion layer connecting to an origin such as _OddsAPI_ or _Sportradar_ is logically necessary and is intended to populate the `matches` and `odds_snapshots` tables prior to feature extraction.
+Betting-related content is heavily regulated. In Türkiye, advertising or promoting betting/gambling
+(including via social media and Telegram channels) is restricted under Law 7258 and related rules, and
+illegal betting promotion carries penalties. App stores (Apple, Google Play) have their own gambling and
+"real-money" policies, and tipster services are regulated in many countries. Before publishing signals
+publicly or monetising them, get advice from a lawyer in the jurisdiction(s) you target. Keep the
+disclaimer in every message, restrict to 18+, make no profit guarantees and add no affiliate links
+unless counsel confirms it is lawful.
